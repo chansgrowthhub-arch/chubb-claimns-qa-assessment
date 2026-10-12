@@ -1,19 +1,21 @@
 // K6 smoke/load test for the read-heavy paths through the BFF (bonus deliverable).
-// Run against the Docker Compose stack:
-//   k6 run load/k6-claims-smoke.js
-//   k6 run -e BFF_URL=http://localhost:8090 -e VUS=20 -e DURATION=2m load/k6-claims-smoke.js
 //
-// Thresholds are deliberately loose placeholders: a real baseline must be captured on the
-// target environment first (see TEST_STRATEGY.md section 5). Note the BFF uses httpOnly cookies,
-// so each VU logs in once and k6's per-VU cookie jar carries access_token automatically.
+// 1. Seed one Keycloak user per VU (shared accounts trip Keycloak brute-force protection):
+//      ./load/seed-load-users.sh 20
+// 2. Run k6 on the compose network, no local install needed:
+//      docker run --rm --network demo-network -v "$PWD/load:/scripts" grafana/k6:0.54.0 run \
+//        -e BFF_URL=http://bff-service:8090 -e VUS=10 -e DURATION=30s /scripts/k6-claims-smoke.js
+//    or with a local k6:  k6 run -e BFF_URL=http://localhost:8090 load/k6-claims-smoke.js
+//
+// Thresholds are first-pass values from a 10-VU run on a laptop Docker Desktop stack, not an
+// SLA (see TEST_STRATEGY.md). The BFF uses httpOnly cookies, so each VU logs in once and k6's
+// per-VU cookie jar carries access_token automatically.
 import http from 'k6/http';
 import { check, group, sleep } from 'k6';
 
 const BFF_URL = __ENV.BFF_URL || 'http://localhost:8090';
-const CLAIMANT = {
-  email: __ENV.CLAIMANT_EMAIL || 'claimant@demo.com',
-  password: __ENV.CLAIMANT_PASSWORD || 'Claimant123!',
-};
+// One account per VU: loaduser<VU>@demo.com, created by seed-load-users.sh.
+const claimantForThisVu = () => ({ email: `loaduser${__VU}@demo.com`, password: 'LoadUser123!' });
 const ADMIN = {
   email: __ENV.ADMIN_EMAIL || 'admin@demo.com',
   password: __ENV.ADMIN_PASSWORD || 'Admin123!',
@@ -22,6 +24,9 @@ const JSON_HEADERS = { headers: { 'Content-Type': 'application/json' } };
 const THINK_TIME_SECONDS = 1;
 
 export const options = {
+  // k6 empties each VU's cookie jar at the start of every iteration by default. We log in once
+  // per VU and rely on the httpOnly access_token cookie, so the jar must persist.
+  noCookiesReset: true,
   scenarios: {
     claimants: {
       executor: 'constant-vus',
@@ -44,29 +49,40 @@ export const options = {
   },
 };
 
-function login(user) {
+// Per-VU login state. Retry on the next iteration if login fails instead of hammering
+// protected endpoints unauthenticated.
+let loggedIn = false;
+
+function ensureLoggedIn(user) {
+  if (loggedIn) return true;
   const res = http.post(`${BFF_URL}/api/auth/login`, JSON.stringify(user), {
     ...JSON_HEADERS,
     tags: { endpoint: 'login' },
   });
-  check(res, { 'login succeeded': (r) => r.status === 200 });
+  loggedIn = check(res, { 'login succeeded': (r) => r.status === 200 });
+  return loggedIn;
 }
 
+// Never call r.json() on a failed response: it throws, aborts the iteration and skips sleep().
+const isJsonArray = (r) => {
+  try { return r.status === 200 && Array.isArray(r.json()); } catch (e) { return false; }
+};
+
 export function claimantJourney() {
-  if (__ITER === 0) login(CLAIMANT);
+  if (!ensureLoggedIn(claimantForThisVu())) { sleep(THINK_TIME_SECONDS); return; }
 
   group('list own claims', () => {
     const res = http.get(`${BFF_URL}/api/claims`, { tags: { endpoint: 'list_claims' } });
     check(res, {
       'list claims 200': (r) => r.status === 200,
-      'list claims returns array': (r) => Array.isArray(r.json()),
+      'list claims returns array': isJsonArray,
     });
   });
   sleep(THINK_TIME_SECONDS);
 }
 
 export function adminJourney() {
-  if (__ITER === 0) login(ADMIN);
+  if (!ensureLoggedIn(ADMIN)) { sleep(THINK_TIME_SECONDS); return; }
 
   group('dashboard via cache', () => {
     const res = http.get(`${BFF_URL}/api/admin/dashboard/stats`, {
