@@ -232,3 +232,34 @@ docker compose -f docker-compose.apps.yml up --build --pull never claims-service
 docker compose -f docker-compose.apps.yml up --build --pull never bff-service
 docker compose -f docker-compose.apps.yml up --build --pull never ui
 ```
+
+---
+
+## QA Assessment Deliverables (added)
+
+| File | Purpose |
+|------|---------|
+| [TEST_STRATEGY.md](TEST_STRATEGY.md) | Risk assessment, test choices, defects found, next steps |
+| [AI_JOURNAL.md](AI_JOURNAL.md) | What I accepted, challenged and overrode from the AI |
+| [load/k6-claims-smoke.js](load/k6-claims-smoke.js) | Bonus k6 smoke and load script |
+
+### Running the tests
+
+```bash
+# Unit and component suites (no Docker needed) - all green
+cd code/claims-service && mvn test
+cd code/bff-service    && mvn test
+cd code/demo-app-ui    && npm ci && npm run generate:api && npm test
+
+# Known-defect regression tests - FAIL BY DESIGN until the bugs are fixed
+cd code/bff-service && mvn test -Dgroups=defect -Dsurefire.excludedGroups=integration
+
+# Integration tests (Testcontainers - needs Docker)
+mvn test -Dgroups=integration -Dsurefire.excludedGroups=
+
+# E2E (needs ./start-infra.sh && ./start-app.sh first)
+cd code/demo-app-ui && npx playwright install chromium && npx playwright test
+
+# Load (needs the stack and k6)
+k6 run load/k6-claims-smoke.js
+```
