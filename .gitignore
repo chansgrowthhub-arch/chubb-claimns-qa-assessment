@@ -32,3 +32,9 @@ venv/
 
 # MyPy
 .mypy_cache/
+
+# Build outputs
+**/target/
+**/node_modules/
+**/.next/
+.DS_Store
