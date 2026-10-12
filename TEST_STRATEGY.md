@@ -1,24 +1,26 @@
 # Test Strategy & Application Assessment
 
 **Author:** Chan Basha (QA take-home, Chubb APAC)
-**Scope:** Claims Management demo app — Next.js UI, Spring Boot BFF, Spring Boot Claims Service, Kafka/Debezium, Keycloak, Redis, PostgreSQL.
-**Constraint declared up front:** my assessment machine has no Docker/Podman, so everything that needs a container (Testcontainers integration tests, full-stack E2E) is *written and reviewed* but verified only by compilation, not execution. Unit and component suites were executed locally and are green. This trade-off is explained per layer below.
+**Scope:** Claims Management demo app: Next.js UI, Spring Boot BFF, Spring Boot Claims Service, Kafka/Debezium, Keycloak, Redis, PostgreSQL.
+**Environment:** Windows 11, Docker Desktop 4.94 (engine 29.8.2), JDK 21, Maven 3.9.9, Node 22. The full Docker Compose stack was started and every suite below was executed against it, including the optional Debezium CDC stack.
 
-### Verified results (run locally, JDK 21 / Maven 3.9.9 / Node 22)
+### Verified results
 
 | Suite | Command | Result |
 |-------|---------|--------|
-| Claims-service unit | `cd code/claims-service && mvn test` | 237 passed, 0 failed |
-| BFF unit | `cd code/bff-service && mvn test` | 219 passed, 0 failed |
-| UI component/unit | `cd code/demo-app-ui && npm test` | 278 passed, 0 failed |
-| BFF known-defect tests | `mvn test -Dgroups=defect -Dsurefire.excludedGroups=integration` | 2 failed by design (defects 4-B, 4-C) |
-| Playwright E2E | `npx playwright test` (needs the full stack) | 10 specs compile and list; **not executed**, because there was no Docker |
+| Claims-service unit | `cd code/claims-service && mvn test` | 237 passed |
+| BFF unit | `cd code/bff-service && mvn test` | 219 passed |
+| UI component/unit | `cd code/demo-app-ui && npm test` | 280 passed (includes 1 known-defect test that fails by design) |
+| BFF known-defect tests | `mvn test -Dgroups=defect -Dsurefire.excludedGroups=integration` | 2 fail by design (findings 5 and 6) |
+| Integration (Testcontainers) | `mvn test -Dgroups=integration -Dsurefire.excludedGroups=` | Claims service 8 passed, BFF 4 passed (after pinning images, finding 14) |
+| Playwright E2E, live stack | `cd code/demo-app-ui && npx playwright test` | 11 passed: 9 green and 2 known-defect tests that fail by design (findings 4 and 7) |
+| k6 load, live stack | see `load/k6-claims-smoke.js` | 10 VUs for 60 s: 650 requests, 0 failed, list-claims p95 72 ms, cached dashboard p95 77 ms |
 
-As received, the backend suites did not pass. One test did not compile (the planted one). Two more classes were stale: 9 failures in claims-service. In the UI, 8 shipped tests failed. The details are in section 4-D.
+**As received**, the suites did not pass. The planted test did not compile, two more claims-service classes were stale (9 failures), 8 UI tests failed, the E2E runner had no setup file, and two integration tests failed on this machine. Finding 9 has the details.
 
 ---
 
-## 1. How the system actually works (what I verified by reading every layer)
+## 1. How the system works
 
 ```
 Browser ── cookie (access_token, httpOnly) ──> Next.js (rewrites /api/* → BFF)
@@ -30,90 +32,169 @@ BFF :8090 ── validates JWT, proxies ──> Claims Service :8080 ── JPA 
   │
 Kafka ◄── Claims Service publishes claim-events (only when app.events.cdc-enabled=false)
   ▲
-  └── Debezium publishes cdc.demo-app.public.claims (only when CDC stack is up)
+  └── Debezium publishes cdc.demo-app.public.claims (only when the CDC stack is up)
 BFF consumes both topics → broadcasts WebSocketMessage to claim owner + admins
 ```
 
-Key mechanics that drive my risk ranking:
+- **Business rules live in one place.** The `Claim` aggregate holds validation boundaries and the status machine in `ClaimStatus.canTransitionTo`. A defect here corrupts money-bearing records.
+- **Access control is enforced three times.** The UI route guard is cosmetic. The BFF restricts `/api/admin/**` to admins. The claims service checks roles and claim ownership, and that is the real control.
+- **Real-time updates have two mutually exclusive producer modes.** A flag selects them, and one BFF consumer parses two different payload shapes. This is the most brittle seam in the system.
+- **Auth is hand-rolled around Keycloak.** Login uses the password grant and decodes the JWT by hand. Cookies, CSRF and signup through the Keycloak admin API are custom code.
 
-- **Business rules live in one place:** `Claim` aggregate (validation boundaries, status machine in `ClaimStatus.canTransitionTo`). A defect here corrupts money-bearing records.
-- **RBAC is enforced three times** (UI route guard = cosmetic; BFF Spring Security `/api/admin/** hasRole('ADMIN')`; claims-service `@PreAuthorize` + ownership check in `GetClaimUseCase`). The claims-service layer is the real control because the BFF calls it with a *service-account* token for some admin operations.
-- **Real-time updates have two mutually exclusive producer modes** switched by `app.events.cdc-enabled`, consumed by one BFF consumer that parses two *different* payload shapes. This is the most brittle integration seam in the system.
-- **Auth is hand-rolled around Keycloak** (password grant + manual JWT payload decoding in `LoginUseCaseImpl`, cookie plumbing in `AuthController`, CSRF via `CookieCsrfTokenRepository`).
-
-## 2. Highest-risk areas (ranked) and why
+## 2. Highest-risk areas and why
 
 | # | Area | Why it ranks here |
 |---|------|-------------------|
-| 1 | **Claim domain rules** (amount/date/length boundaries, status state machine) | Direct financial impact; every other layer trusts these rules; boundary mistakes (≤ vs <) are silent. |
-| 2 | **Kafka → WebSocket event pipeline** (envelope shape, CDC field names, mode switch) | Three hand-written JSON contracts with no schema registry and validation disabled by default (`kafka.producer.schema-validation.enabled=false`). Failures are silent — the UI just never updates. I found real defects here (see §4). |
-| 3 | **RBAC & ownership** (claimant cannot read others' claims; admin-only endpoints) | A gap leaks other customers' claim data. The BFF's shared mutable `ApiClient` bearer token makes this worse (§4-F). |
-| 4 | **Auth/session lifecycle** (login, refresh-on-401, logout, CSRF) | Hand-rolled; mistakes here are account-takeover or lockout class. Logout is in fact broken (§4-C). |
-| 5 | **Admin status transitions end-to-end** (optimistic UI update + rollback + 400 ProblemDetail) | Multi-layer flow with an optimistic update in Zustand that must roll back correctly. |
-| 6 | Dashboard caching (Redis TTL, bypass, flush) | Wrong numbers are embarrassing but not corrupting; graceful-degradation code already defensive. |
+| 1 | Claim domain rules | Direct financial impact. Every other layer trusts them, and boundary mistakes are silent. |
+| 2 | Kafka to WebSocket pipeline | Hand-written JSON contracts, schema validation switched off, silent failure. Findings 1 and 6 live here. |
+| 3 | Access control and ownership | A gap leaks other customers' claims. Findings 7 and 10 touch this. |
+| 4 | Auth and session lifecycle | Hand-rolled. Findings 2, 4 and 5 live here. |
+| 5 | Environment and setup | A stack that only works on one machine invalidates every other test. Findings 3 and 14 live here. |
+| 6 | Dashboard caching | Wrong numbers are embarrassing but not corrupting, and the code already degrades gracefully. |
 
-## 3. What I tested, what I deliberately left out
+## 3. What I tested, and what I left out
 
-### Executed and green on my machine
-- **Claims-service unit tests** (`mvn test`, integration tag excluded): fixed the planted compile-broken test (`UpdateClaimStatusUseCaseTest` missed the `ApplicationEventPublisher` constructor arg) and added:
-  - `ClaimBoundaryTest` — exact boundary values for amount (0.01 ✓ / 1,000,000 ✓ / 1,000,000.01 ✗ / 0 ✗), description (9/10/1000/1001 incl. trimming interaction), location (4/5/200/201), incident date (today ✓ / tomorrow ✗). These catch off-by-one regressions the existing "happy + one sad" tests would miss.
-  - `ClaimStatusTransitionMatrixTest` — full 5×5 parameterised matrix as a single source of truth, replacing scattered per-case asserts.
-- **BFF unit tests**: added `ClaimEventKafkaConsumerContentTest` — the existing tests only verified *that* a broadcast happened, never *what* was broadcast, which is exactly how the CDC field-name bug (§4-B) slipped through. New tests capture the `WebSocketMessage` and assert claimId/status/oldStatus content for: domain-event envelope, real Debezium column names (`claim_id`), and the documented-schema shape (`id`) — the last one is tagged `defect` and fails by design against current code (run with `-Dgroups=defect -Dsurefire.excludedGroups=integration`); the default suite stays green.
-  - `AuthCsrfContractTest` — proves `POST /api/auth/logout` without an `X-XSRF-TOKEN` header is rejected (403). Green server-side, but it documents §4-C: the UI's logout fetch never sends that header.
-- **UI component/unit tests** (Vitest + Testing Library): added
-  - `login-page.test.tsx` — user-perspective: validation messages, 401 → "Invalid email or password", role-based redirect (ADMIN → dashboard, CLAIMANT → claims), network-error path.
-  - `claims-table.test.tsx` — renders rows, realtime highlight for recently-updated claim IDs, copy-ID affordance, view-details callback.
-  - `use-claim-realtime-handler` behaviour is already covered via `use-realtime-store`/`use-realtime-claim-updates` tests; I did not duplicate.
-- **Repaired shipped tests so the baseline is trustworthy:** `CreateClaimUseCaseTest` (missing mock; it now asserts the event is published and then cleared); `KafkaDomainEventPublisherTest` (rewritten against the real envelope); `wizard-step-2.test.tsx` (a 950-character `type()` timed out and poisoned later tests, so it now pastes); `use-theme-store` (the code was changed to match the tests' localStorage spec).
+### Added tests
+- **Claims service unit tests.**
+  - `ClaimBoundaryTest` covers exact boundary values for amount, description, location and incident date.
+  - `ClaimStatusTransitionMatrixTest` asserts the full 5×5 status matrix from one table.
+- **BFF unit tests.**
+  - `ClaimEventKafkaConsumerContentTest` asserts what is broadcast, not just that a broadcast happened.
+  - `AuthCsrfContractTest` pins the logout CSRF contract.
+  - Two tests tagged `defect` fail by design.
+- **UI component tests.**
+  - `login-page.test.tsx` and `claims-table.test.tsx` test behaviour by role and label.
+  - `incident-date-timezone.test.ts` pins finding 8 with `it.fails`.
+- **Playwright E2E**, with page objects and a global setup that logs in each user once and warms every route.
+  - The claimant journey: three-step wizard, then the claim appears in the list.
+  - The admin journey: two status changes, then a check that illegal transitions are not offered.
+  - RBAC and auth checks: wrong password, role routing, the anonymous redirect, a claimant calling an admin API, and a data-leak guard.
+  - Two known-defect tests marked `test.fail`.
+- **k6** load script, plus `seed-load-users.sh`, which creates one account per virtual user (finding 15).
 
-### Written, compile-reviewed, but requiring the Docker stack (not executable on this machine)
-- **Playwright E2E** (`code/demo-app-ui/tests/e2e/`): claimant journey (login → 3-step wizard → claim appears in list), admin journey (login → change status with confirmation → badge updates), RBAC smoke (claimant blocked from /admin). Page objects in `tests/e2e/pages/`, storage-state auth in `global-setup.ts` (which the shipped `playwright.config.ts` referenced but did not exist — the E2E runner was broken out of the box).
-- Existing Testcontainers integration tests (Kafka consumer, Postgres repository, RBAC) were reviewed, left in place, and remain behind the `integration` tag.
+### Repaired shipped tests
+- `UpdateClaimStatusUseCaseTest` (the planted error) and `CreateClaimUseCaseTest` were missing a dependency.
+- `KafkaDomainEventPublisherTest` was rewritten against the real envelope.
+- `wizard-step-2.test.tsx` now pastes text instead of typing 950 keystrokes.
+- The theme store now uses `localStorage`, as its tests specify.
+- The Testcontainers images are now pinned.
 
-### Deliberately left out, and why
-- **Load tests**: a K6 smoke script is included (`load/k6-claims-smoke.js`, bonus) but untuned — meaningful thresholds need a running stack and a performance baseline I can't capture here.
-- **Contract tests (Pact)**: the OpenAPI specs are the de-facto contract and both sides are code-generated from them, so consumer-driven contracts add least marginal value in the 2–3 h budget; the genuinely unguarded contracts are the *Kafka* ones, which I covered with content-asserting consumer tests instead.
-- **Keycloak adapter integration, tracing/metrics, theming, Redis serialization round-trip**: low blast radius or pure infrastructure glue.
-- **More Testcontainers tests**: writing container tests I cannot execute invites exactly the "always passes / never ran" anti-pattern the brief warns about.
+### Live verification scripts
+These are outside the repo, and their output is captured in the PDF report. They reproduce findings 1, 2, 4, 5, 6 and 7 with raw HTTP and WebSocket calls. For findings 1 and 2, they also confirm the recommended fix works by restarting a single container with the corrected setting.
 
-## 4. Defects and quality concerns found
+### Deliberately left out
+- **Pact contract tests.** Both HTTP sides are generated from the OpenAPI specs. The unguarded contracts were the Kafka ones, so I tested those instead.
+- **New Testcontainers tests.** The existing ones now run green. I spent the remaining time on live end-to-end verification instead.
+- **Keycloak adapter internals, tracing and metrics, theming, Redis serialisation.** All have a low blast radius.
 
-**A. Real-time updates are silently dead in the default quick-start (High).**
-`docker-compose.apps.yml` sets `APP_EVENTS_CDC_ENABLED: "true"`, but the README says Mode 1 (direct Kafka, `false`) is the default. With the flag true and `start-cdc.sh` not run, `CreateClaimUseCase`/`UpdateClaimStatusUseCase` skip publishing entirely and Debezium isn't there to compensate → no Kafka events, no WebSocket updates, no admin toasts. Nothing errors; the feature just doesn't happen.
+## 4. Findings
 
-**B. CDC message contract is self-contradictory (High).**
-`ClaimEventKafkaConsumer.handleCdcUpdate/Create` read `after.claim_id` (matches real Debezium column names), but the committed AsyncAPI schema `DebeziumClaimsMessage.json` documents the field as `id`, and `TestEventController` (the deterministic E2E injection tool) also emits `id`. Any mock CDC event therefore broadcasts a WebSocketMessage with an **empty claimId**, and the UI updates nothing. The shipped unit tests pass because they assert only "a broadcast happened". My `defect`-tagged test pins this down.
+Severity reflects impact on a real user or on the team's ability to test.
 
-**C. Logout doesn't log out (High).**
-`POST /api/auth/logout` is *not* in the BFF's CSRF ignore list, so it requires an `X-XSRF-TOKEN` header. The UI's `app-header.tsx` logout uses a raw `fetch` that never sends one → the BFF returns 403, the `catch` swallows it, local Zustand state is cleared, but the httpOnly `access_token` cookie survives and the Keycloak session is never invalidated. The user looks logged out but any direct navigation is still authenticated for up to the cookie lifetime. The shipped `AuthControllerTest` masked this by always adding `.with(csrf())`.
+| # | Finding | Severity | Status | How it was proven |
+|---|---------|----------|--------|-------------------|
+| 1 | Real-time updates are off in the default stack | High | Open | Live: no WebSocket event and 0 Kafka messages. Fix validated live. |
+| 2 | Signup is broken: the BFF uses the wrong Keycloak admin password | High | Open | Live: HTTP 500 and Keycloak 401. Fix validated live. |
+| 3 | A fresh clone renders no app pages: the API client is never generated | High | Open | Live: fresh-clone image returns 500 "Module not found" |
+| 4 | Logout is rejected by CSRF protection, so the session survives | High | Open | Live in API and browser; contract test; E2E `test.fail` |
+| 5 | Logout fails when the access token has expired | High | Open | Live 401; unit test tagged `defect` |
+| 6 | The CDC contract is wrong: the schema says `id`, Debezium sends `claim_id`, plus 4 type mismatches | Medium | Open | Real Debezium message; unit test tagged `defect` |
+| 7 | The BFF returns 500 for "not found" and "forbidden" claims | Medium | Open | Live; E2E `test.fail` |
+| 8 | Incident dates show one day early for users west of UTC | Medium | Open | Reproduced; `it.fails` unit test |
+| 9 | The shipped test suite could not pass | Medium | Fixed | Before and after runs |
+| 10 | Shared bearer token across concurrent requests | Medium | Open | Code review; not reproduced at 10 users |
+| 11 | `changedBy` records the claim owner instead of the admin | Medium | Open | Code review |
+| 12 | Theme preference is lost in every new tab | Low | Fixed | Shipped tests now pass |
+| 13 | The E2E runner was broken: setup file missing | Low | Fixed | 11 specs run |
+| 14 | Unpinned `:latest` Testcontainers images break the integration tests | Low | Fixed | Before 2 errors, after 12 of 12 |
+| 15 | Concurrent logins for the same account are rejected | Low | Open | Live: 8 of 10 parallel logins got 401 |
+| 16 | `start-cdc.sh` reports failure on a clean, successful run | Low | Open | Live |
+| 17 | The status-change error detail is dropped (empty 400) | Low | Open | Code review |
+| 18 | Smaller contract and security smells | Low | Open | Code review |
 
-**C2. Logout also fails for users whose token has expired (High).**
-`CookieAuthenticationFilter` turns any `access_token` cookie into a Bearer header. The resource server rejects an expired or invalid token with 401 before `AuthController.logout` runs. A user whose 5-minute access cookie is stale therefore cannot clear the `refresh_token` cookie, which is valid for 30 minutes. This is pinned by the `defect` test `should_ClearCookies_When_LogoutCalledWithExpiredAccessToken`. I found it while writing the passing CSRF test.
+**1. Real-time updates are off in the default stack.**
+`docker-compose.apps.yml` sets `APP_EVENTS_CDC_ENABLED: "true"`, while the README says direct Kafka is the default. In CDC mode the claims service publishes nothing and relies on Debezium, which the quick-start never starts.
 
-**D. The planted broken test, plus a stale test suite (expected find, wider than planted).**
-The planted test was not the only problem. `CreateClaimUseCaseTest` threw null pointers for the same missing dependency. `KafkaDomainEventPublisherTest` mocked `writeValueAsString(event)`, but the publisher now builds its envelope with `createObjectNode()`, so all 6 of its tests failed. In the UI, 6 wizard tests failed because of one slow typing test, and 2 theme tests failed because the store persisted to `sessionStorage` while the spec says `localStorage`. The theme mismatch was a real minor defect: theme preference was lost in every new tab. Taken together, the shipped suite cannot have been green in CI. Its coverage and mutation thresholds (90%/80%) were therefore never enforced.
+- **Live evidence:** the claims service logged "CDC enabled — event will be published by Debezium". `claim-events` held 0 messages, and the admin WebSocket received nothing within 15 s.
+- **Fix validated:** with the flag set to `false`, the event arrived in under 1 s and the topic held 1 message.
 
-The planted test, `UpdateClaimStatusUseCaseTest`, did not compile because the use case gained an `ApplicationEventPublisher` dependency the test never received. It is fixed. `CreateClaimUseCaseTest` now asserts that the event is published and then cleared when `cdc-enabled=false`.
+**2. Signup is broken.**
+The BFF falls back to `KEYCLOAK_ADMIN_PASSWORD=admin`, but compose bootstraps Keycloak with `Admin123!`, and `docker-compose.apps.yml` never passes the real value. Every signup returns 500. The BFF log shows `NotAuthorizedException: HTTP 401` from the Keycloak admin client.
 
-**E. `ClaimStatusChanged.changedBy` is the claim owner, not the admin (Medium).**
-`Claim.updateStatus` builds the event with `this.userId`. The schema documents changedBy as "the admin user who changed the status". Routing to the owner works *by accident* because the BFF treats this field as the notification target — fixing the semantics naively would break owner notifications. Classic coupled-contract trap; worth a test before anyone "fixes" it.
+- **Fix validated:** with `KEYCLOAK_ADMIN_PASSWORD` set on `bff-service`, signup returns 201 and the new user can log in.
 
-**F. Shared mutable bearer token on a singleton ApiClient (Medium, concurrency).**
-`AdminController` and `ClaimsServiceAdapter` call `apiClient.setBearerToken(...)` per request on a shared client. Two concurrent requests can interleave: user B's call to claims-service can carry user A's token (or the service-account token), which is both a correctness and an authorization bleed risk. Needs per-request client or request-interceptor token resolution. Not demonstrable without a running stack + load, hence flagged, not tested.
+**3. A fresh clone renders no app pages.**
+The generated client is gitignored. The UI `Dockerfile` runs `next dev` without generating it, and `start-app.sh` never generates it either. I cloned the repo from GitHub and built the UI image exactly as compose does. `/login` works, but every authenticated page returns 500 `Module not found: Can't resolve './generated'`. It only worked on my machine because I had run `npm run generate:api` earlier.
 
-**G. Money as `double` across every HTTP contract (Medium).**
-Domain uses `BigDecimal`, but OpenAPI declares `number format: double`, so each hop does BigDecimal→double→BigDecimal. DB column is `DECIMAL(12,2)` so storage is safe; display/comparison drift is possible at high precision. Recommend `type: string` + BigDecimal mapping.
+- **Fix:** generate the client in `start-app.sh` before the compose build, or generate it inside the image with the spec in the build context.
 
-**H. Smaller findings.**
-- BFF `AdminController` maps claims-service 400s to an **empty** 400 body, dropping the ProblemDetail ("Cannot transition from X to Y") the OpenAPI contract promises; the admin UI then shows a generic message.
-- Domain allows amounts like `0.001` (`> 0`), while API bean-validation enforces `>= 0.01` — inconsistent floor if any non-HTTP path creates claims.
-- Access-token cookie Max-Age is 5 min while the Keycloak access token lives 24 h (`accessTokenLifespan: 86400`) — a long-lived bearer outlives its carrier cookie by design-smell; also WebSocket falls back to accepting the JWT as a **query parameter** (token leakage into logs/history).
-- UI truncates descriptions at 50 chars with "…", summary API truncates at 100 without — cosmetic inconsistency.
-- `tests/e2e/global-setup.ts` referenced by `playwright.config.ts` did not exist → `npx playwright test` failed before I added the E2E suite.
+**4. Logout is rejected by CSRF protection.**
+`/api/auth/logout` is not in the CSRF ignore list, and the UI's raw fetch sends no `X-XSRF-TOKEN` header.
+
+- **Live in the browser:** logout returned 403 and the `access_token` cookie survived. Navigating back to `/claims` showed the claimant's claims, and the API answered 200.
+- **Masked by the shipped tests:** `AuthControllerTest` always added a CSRF token.
+
+**5. Logout fails when the access token has expired.**
+`CookieAuthenticationFilter` turns any `access_token` cookie into a Bearer header. An expired token gets 401 before logout runs, so no cookies are cleared. This was confirmed live.
+
+**6. The CDC contract is wrong.**
+I captured a real Debezium message from the live stack:
+
+- It uses `claim_id`, so the BFF consumer is correct.
+- The committed `DebeziumClaimsMessage.json` schema and `TestEventController` use `id`, so every injected test event reaches the UI with an empty claim id.
+- `claim_amount` arrives as base64 decimal bytes (`"AeJA"` is 1234.56), not a number.
+- `incident_date` arrives as days since epoch, and the timestamps as microseconds, not date strings.
+
+Enabling the existing schema validator would reject every real event. I downgraded this from High after seeing the production CDC path work end to end.
+
+**7. The BFF returns 500 for "not found" and "forbidden" claims.**
+The claims service correctly returns a ProblemDetail with 404 or 403. `ClaimsServiceAdapter.getClaim` wraps both in `IllegalStateException`, so the browser gets a bare 500. No data leaks, but the UI shows a generic error instead of "Claim not found".
+
+**8. Incident dates show one day early for users west of UTC.**
+The generated client parses `"2026-10-01"` with `new Date()`, which gives UTC midnight, and `formatDate` renders it in local time. New York and Los Angeles show "Sep 30, 2026". Users in APAC and the UK are unaffected. I reproduced this with the generated client.
+
+**9. The shipped test suite could not pass.** This is now fixed.
+- **Claims service:** the planted compile error, plus two stale classes (9 failures).
+- **UI:** 8 failures. One slow typing test leaked keystrokes into five others, and two failures came from finding 12.
+- **E2E:** the runner failed because its setup file was missing.
+- **Integration:** 2 tests errored on this machine (finding 14).
+
+The coverage and mutation thresholds in the POMs could never have been enforced.
+
+**10. Shared bearer token on a singleton `ApiClient`.**
+`AdminController` and `ClaimsServiceAdapter` mutate one client's bearer token per request. Under concurrency, a call could go out with another user's token. Ten parallel list-claims calls showed no failures, which is weak evidence the race is narrow, not proof it is absent. It needs a targeted concurrency test with mixed roles.
+
+**11. `changedBy` records the claim owner instead of the admin.**
+`Claim.updateStatus` fills it with `this.userId`. Owner notifications only work because the BFF uses this field as the notification target.
+
+**12. Theme preference is lost in every new tab.** This is fixed; the store now uses `localStorage`.
+
+**13. The E2E runner was broken.** This is fixed. `global-setup.ts` was referenced by the config but missing.
+
+**14. Unpinned Testcontainers images break the integration tests.** This is fixed.
+`postgres:latest` now resolves to Postgres 18.6, which rejects the JVM's default zone name `Asia/Calcutta` (the default on an Indian Windows install), so 2 full-context tests errored. The test I left untouched already pinned `postgres:15-alpine`, as compose does. Postgres and Redis are now pinned to the compose versions. Kafka is still `:latest`.
+
+**15. Concurrent logins for the same account are rejected.**
+Ten parallel logins with valid credentials gave 8 × 401, through the BFF and directly against Keycloak. Ten distinct users in parallel all succeeded. The realm has `bruteForceProtected: true`. Users see "Invalid email or password" after a double submit or simultaneous logins from two devices. It is also a load-test trap, which I worked around with one account per virtual user.
+
+**16. `start-cdc.sh` reports failure on a clean, successful run.**
+The CDC compose file's `debezium-init` container registers the connector, then the script deletes it and registers it again. That gives 409, "ERROR" and exit 1, although the connector is RUNNING.
+
+**17. The status-change error detail is dropped.**
+`AdminController.updateClaimStatus` returns an empty 400, discarding "Cannot transition from X to Y".
+
+**18. Smaller smells.**
+- Money is declared as `double` in both OpenAPI specs.
+- The domain accepts 0.001 while the API floor is 0.01.
+- The WebSocket accepts the JWT in the query string.
+- The access token lives 24 h but its cookie only 5 min.
+- The UI truncates descriptions at 50 characters, the API at 100.
+- The Testcontainers Keycloak is 26.1.4, while compose uses 26.5.2.
 
 ## 5. What I'd do next, in order
-1. Spin the Docker stack and run the Playwright suite + the `integration`-tagged Testcontainers tests; confirm findings A and C live (both have precise repro steps above).
-2. Fix A–C (one-line compose fix; align CDC schema/TestEventController/consumer on `claim_id`; add logout to the CSRF ignore list *or* send the header from the UI) — each with the regression test already written here.
-3. Kafka contract tests: validate the producer envelope against the AsyncAPI JSON schemas in CI (the validator exists and is switched off).
-4. Concurrency test for F (parallel admin + claimant requests through the BFF asserting token isolation), then refactor to per-request clients.
-5. K6 baseline on list-claims and dashboard endpoints; wire thresholds.
+1. Fix findings 1–5. Four are configuration or one-line changes, and findings 1 and 2 are already validated live. The failing defect tests then turn green and stay as regression guards.
+2. Make the quick-start reproducible: generate the API client in the build, pin all images, and add a CI job that runs from a fresh clone.
+3. Fix the CDC schema to match real Debezium output. Run the schema validator in CI against a captured Debezium message.
+4. Map claims-service ProblemDetails through the BFF unchanged (findings 7 and 17). Treat date-only fields as dates in the UI (finding 8).
+5. Write a mixed-role concurrency test for finding 10, then move to per-request tokens.
+6. Run k6 at higher load against a production-like build (`next start`, not `next dev`), then set real thresholds.

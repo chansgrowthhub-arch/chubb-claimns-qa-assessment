@@ -239,27 +239,48 @@ docker compose -f docker-compose.apps.yml up --build --pull never ui
 
 | File | Purpose |
 |------|---------|
-| [TEST_STRATEGY.md](TEST_STRATEGY.md) | Risk assessment, test choices, defects found, next steps |
+| [docs/QA_Findings_Report.pdf](docs/QA_Findings_Report.pdf) | Walkthrough report: 18 findings with live evidence and fixes |
+| [TEST_STRATEGY.md](TEST_STRATEGY.md) | Risk assessment, test choices, findings, next steps |
 | [AI_JOURNAL.md](AI_JOURNAL.md) | What I accepted, challenged and overrode from the AI |
-| [load/k6-claims-smoke.js](load/k6-claims-smoke.js) | Bonus k6 smoke and load script |
+| [load/](load/) | k6 load script and the Keycloak load-user seeder |
+
+### Before you start the stack (known setup defects)
+
+The quick-start above has three defects, all documented in TEST_STRATEGY.md. Work around them like this:
+
+```bash
+# Finding 3: the UI's API client is gitignored and never generated, so every page behind login returns 500
+cd code/demo-app-ui && npm ci && npm run generate:api && cd -
+
+# Finding 2: signup returns 500 unless the BFF gets the real Keycloak admin password
+#   add  KEYCLOAK_ADMIN_PASSWORD: "Admin123!"  under bff-service.environment in docker-compose.apps.yml
+
+# Finding 1: real-time updates need APP_EVENTS_CDC_ENABLED: "false", unless ./start-cdc.sh is running
+```
+
+The E2E suite runs against the stack exactly as shipped. It does not need these workarounds, apart from the generated client.
 
 ### Running the tests
 
 ```bash
-# Unit and component suites (no Docker needed) - all green
-cd code/claims-service && mvn test
-cd code/bff-service    && mvn test
-cd code/demo-app-ui    && npm ci && npm run generate:api && npm test
+# Unit and component suites (no Docker needed)
+cd code/claims-service && mvn test           # 237 passed
+cd code/bff-service    && mvn test           # 219 passed
+cd code/demo-app-ui    && npm test           # 280 passed (needs the generated client, see above)
 
 # Known-defect regression tests - FAIL BY DESIGN until the bugs are fixed
 cd code/bff-service && mvn test -Dgroups=defect -Dsurefire.excludedGroups=integration
 
-# Integration tests (Testcontainers - needs Docker)
+# Integration tests (Testcontainers, needs Docker running) - claims 8 passed, BFF 4 passed
 mvn test -Dgroups=integration -Dsurefire.excludedGroups=
 
-# E2E (needs ./start-infra.sh && ./start-app.sh first)
+# E2E (needs ./start-infra.sh && ./start-app.sh) - 11 passed, 2 of them known-defect tests that fail by design
 cd code/demo-app-ui && npx playwright install chromium && npx playwright test
 
-# Load (needs the stack and k6)
-k6 run load/k6-claims-smoke.js
+# Load (needs the stack). Seed one Keycloak user per virtual user first, see finding 15.
+./load/seed-load-users.sh 20
+docker run --rm --network demo-network -v "$PWD/load:/scripts" grafana/k6:0.54.0 run \
+  -e BFF_URL=http://bff-service:8090 -e VUS=10 -e DURATION=60s /scripts/k6-claims-smoke.js
 ```
+
+> **Windows:** Docker Desktop's per-user install puts `docker.exe` in `%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin`. Open a new terminal after installing, or add that folder to `PATH`.

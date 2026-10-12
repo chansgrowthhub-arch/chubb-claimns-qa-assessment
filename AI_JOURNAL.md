@@ -40,5 +40,26 @@
 - **Noted:** `global-setup.ts` was referenced by the Playwright config but did not exist, so the E2E runner was broken as shipped.
 - **Limitation, stated plainly:** I confirmed the specs compile and list. They have not run against a live stack.
 
+### 8. Docker phase: running everything against the live stack
+Once Docker Desktop was installed, I had every claim from the first phase re-proved on the running system. This phase changed some conclusions.
+
+- **E2E specs failed on first contact. All three failures were mine, not the app's.**
+  - The admin page renders a CSS-hidden mobile card list with the same controls as the table, so test-ID locators matched two elements.
+  - The dev server injects an "Open Next.js Dev Tools" button that matches the name "Next".
+  - The header has its own "Submit Claim" button.
+
+  I scoped every locator to its table row or wizard step. This is the gap between "compiles and lists" and "runs", and it is why I had flagged the specs as unexecuted.
+- **A cold-start flake: fixed at the source.** The first run on a freshly restarted UI timed out, because `next dev` compiles each route on first request. The AI's first suggestion was to raise the timeout. I overrode it: global setup now visits every route once. A cold rerun passed 11 of 11.
+- **Live checks found three high-severity bugs that code review missed.**
+  - Signup returns 500 because of a Keycloak admin password mismatch.
+  - A fresh clone has no generated API client, so every page behind login returns 500. I proved this by cloning from GitHub and building the image exactly as compose does.
+  - The BFF turns claims-service 404 and 403 responses into 500.
+
+  For findings 1 and 2, I also validated the fix live by restarting one container with the corrected setting.
+- **Bug 2 was downgraded after evidence.** I had rated the CDC field mismatch High from code review. A real Debezium message showed the consumer reads the right field, and the schema and test tool were wrong. It also exposed 4 more type mismatches. I moved it to Medium and widened its scope.
+- **Challenged my own attribution.** k6 showed 8 of 10 parallel logins failing, and the first hypothesis was the shared bearer token (finding 10). Calling Keycloak directly gave the same failures, while distinct users in parallel all succeeded. The cause was same-account contention under Keycloak brute-force protection. I logged it as finding 15 and did not claim finding 10 as proven.
+- **Two bugs in my own load script, not the app.** A failed check threw before `sleep()`, so failing virtual users looped flat out. k6 also clears cookies every iteration by default. I fixed both (`noCookiesReset`, plus a guarded JSON check) before trusting any number. The final run had 0 failures in 650 requests.
+- **Integration tests broke on this machine.** `postgres:latest` now pulls Postgres 18, which rejects the JVM zone `Asia/Calcutta`. I pinned the images to the compose versions rather than forcing the JVM to UTC. Pinning fixes the real problem, which is non-reproducible test infrastructure.
+
 ### Overall stance
 I treated the AI as a fast pair who sometimes reports "done" too early. My rule was to accept nothing as passing until I had seen it run.
