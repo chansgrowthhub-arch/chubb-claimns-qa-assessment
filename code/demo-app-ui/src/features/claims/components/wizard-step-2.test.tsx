@@ -110,8 +110,11 @@ describe('WizardStep2', () => {
 
       const textarea = screen.getByLabelText(/Describe what happened/i);
 
+      // user.type() of 950 chars exceeds the 5s test timeout and its leaked keystrokes
+      // poison every later test in this file; paste is equally user-driven and instant.
       const longText = 'a'.repeat(950);
-      await user.type(textarea, longText);
+      await user.click(textarea);
+      await user.paste(longText);
 
       await waitFor(() => {
         const counter = screen.getByText('950/1000');
