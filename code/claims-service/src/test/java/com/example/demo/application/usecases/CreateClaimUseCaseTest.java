@@ -4,6 +4,7 @@ import com.example.demo.application.exceptions.UserNotFoundException;
 import com.example.demo.domain.claim.Claim;
 import com.example.demo.domain.claim.ClaimRepository;
 import com.example.demo.domain.claim.ClaimStatus;
+import com.example.demo.domain.claim.events.ClaimSubmitted;
 import com.example.demo.fixtures.ClaimTestBuilder;
 import com.example.demo.user.domain.User;
 import com.example.demo.user.domain.UserId;
@@ -16,6 +17,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 
 import java.math.BigDecimal;
 import java.util.Optional;
@@ -41,6 +43,11 @@ class CreateClaimUseCaseTest {
 
     @Mock
     private Counter mockCounter;
+
+    // Missing from the shipped test: the use case gained this dependency but the test was never
+    // updated, so @InjectMocks passed null and every execute() call NPE'd on event publishing.
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
 
     @InjectMocks
     private CreateClaimUseCase useCase;
@@ -108,9 +115,12 @@ class CreateClaimUseCaseTest {
 
         Claim result = useCase.execute(command);
 
-        assertThat(result.getDomainEvents()).isNotEmpty();
+        // With cdc-enabled=false (the default for this unit context) the use case must hand the
+        // ClaimSubmitted event to Spring's publisher and then clear it from the aggregate.
+        verify(eventPublisher).publishEvent(any(ClaimSubmitted.class));
         assertThat(result.getDomainEvents())
-                .anyMatch(event -> event.getClass().getSimpleName().equals("ClaimSubmitted"));
+                .as("domain events must be cleared after direct publishing to avoid double-sends")
+                .isEmpty();
     }
 
     @Test

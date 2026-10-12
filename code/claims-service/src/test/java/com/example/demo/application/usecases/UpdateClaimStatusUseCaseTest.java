@@ -13,6 +13,7 @@ import com.example.demo.user.domain.UserRepository;
 import com.example.demo.user.domain.UserRole;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.springframework.context.ApplicationEventPublisher;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -31,6 +32,7 @@ class UpdateClaimStatusUseCaseTest {
     private ClaimRepository claimRepository;
     private UserRepository userRepository;
     private MeterRegistry meterRegistry;
+    private ApplicationEventPublisher eventPublisher;
     private UpdateClaimStatusUseCase useCase;
 
     private static final UUID CLAIM_ID = UUID.randomUUID();
@@ -42,7 +44,8 @@ class UpdateClaimStatusUseCaseTest {
         claimRepository = mock(ClaimRepository.class);
         userRepository = mock(UserRepository.class);
         meterRegistry = new SimpleMeterRegistry();
-        useCase = new UpdateClaimStatusUseCase(claimRepository, userRepository, meterRegistry);
+        eventPublisher = mock(ApplicationEventPublisher.class);
+        useCase = new UpdateClaimStatusUseCase(claimRepository, userRepository, meterRegistry, eventPublisher);
     }
 
     // TC-031: Use case orchestration logic tested with mocked repositories
