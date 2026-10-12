@@ -8,7 +8,7 @@
 
 | Suite | Command | Result |
 |-------|---------|--------|
-| Claims-service unit | `cd code/claims-service && mvn test` | 221 passed, 0 failed |
+| Claims-service unit | `cd code/claims-service && mvn test` | 237 passed, 0 failed |
 | BFF unit | `cd code/bff-service && mvn test` | 219 passed, 0 failed |
 | UI component/unit | `cd code/demo-app-ui && npm test` | 278 passed, 0 failed |
 | BFF known-defect tests | `mvn test -Dgroups=defect -Dsurefire.excludedGroups=integration` | 2 failed by design (defects 4-B, 4-C) |
