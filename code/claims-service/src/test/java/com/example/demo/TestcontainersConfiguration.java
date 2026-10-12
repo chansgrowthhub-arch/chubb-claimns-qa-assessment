@@ -23,14 +23,14 @@ public class TestcontainersConfiguration {
 	@Bean
 	@ServiceConnection
 	PostgreSQLContainer postgresContainer() {
-		return new PostgreSQLContainer(DockerImageName.parse("postgres:latest"))
+		return new PostgreSQLContainer(DockerImageName.parse("postgres:15-alpine") /* match docker-compose.infra.yml; :latest (PG 18) rejects the JVM zone "Asia/Calcutta" */)
 				.withReuse(true);
 	}
 
 	@Bean
 	@ServiceConnection(name = "redis")
 	GenericContainer<?> redisContainer() {
-		return new GenericContainer<>(DockerImageName.parse("redis:latest"))
+		return new GenericContainer<>(DockerImageName.parse("redis:7-alpine") /* match docker-compose.infra.yml */)
 				.withExposedPorts(6379)
 				.withCommand("redis-server", "--databases", "32")
 				.withReuse(true);
