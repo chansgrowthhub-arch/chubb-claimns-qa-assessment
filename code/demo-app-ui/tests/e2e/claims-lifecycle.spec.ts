@@ -40,7 +40,7 @@ test('claimant submits a claim and sees it listed as Submitted', async ({ browse
   claimId = (await response.json()).claimId;
 
   await expect(page).toHaveURL(/\/claims$/);
-  const row = page.locator('tr', { hasText: claimId.substring(0, 8) });
+  const row = page.locator('table tr', { hasText: claimId.substring(0, 8) });
   await expect(row.getByRole('status')).toHaveText('Submitted');
   await expect(row).toContainText('$2,500.75');
 });
@@ -61,9 +61,10 @@ test('admin moves the claim to Under Review and then Approved', async ({ browser
 test('admin is not offered illegal transitions for an Approved claim', async ({ browser }) => {
   test.skip(!claimId, 'depends on the claim created in the first test');
   const page = await asUser(browser, ADMIN.storageStatePath);
-  await new AdminClaimsPage(page).goto();
+  const adminClaims = new AdminClaimsPage(page);
+  await adminClaims.goto();
 
-  const options = page.getByTestId(`status-select-${claimId.substring(0, 8)}`).locator('option:not([disabled])');
+  const options = adminClaims.statusSelect(claimId).locator('option:not([disabled])');
   await expect(options).toHaveText(['Closed']);
 });
 
@@ -72,6 +73,6 @@ test('claimant sees the approved status after reload', async ({ browser }) => {
   const page = await asUser(browser, CLAIMANT.storageStatePath);
   await page.goto('/claims');
 
-  const row = page.locator('tr', { hasText: claimId.substring(0, 8) });
+  const row = page.locator('table tr', { hasText: claimId.substring(0, 8) });
   await expect(row.getByRole('status')).toHaveText('Approved');
 });

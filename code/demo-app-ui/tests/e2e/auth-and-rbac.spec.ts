@@ -47,13 +47,26 @@ test.describe('role-based access', () => {
     expect(status).toBe(403);
   });
 
-  test('claimant cannot read another user\'s claim by id', async ({ page }) => {
+  test('claimant never receives claim data for an id they do not own', async ({ page }) => {
     await page.goto('/claims');
     const status = await page.evaluate(
       async () => (await fetch('/api/claims/00000000-0000-0000-0000-000000000001')).status
     );
-    // Not-found and forbidden are both acceptable; leaking 200 is not.
-    expect([403, 404, 500]).toContain(status);
+    // Security guard: whatever the error code, the data must not leak.
     expect(status).not.toBe(200);
+  });
+
+  /**
+   * DEFECT (TEST_STRATEGY.md): claims-service answers 404/403 with a ProblemDetail, but the BFF
+   * ClaimsServiceAdapter wraps both in IllegalStateException, so the browser gets a bare 500.
+   * Verified live for a missing claim and for another user's claim.
+   */
+  test('missing claim returns 404 as the BFF contract specifies', async ({ page }) => {
+    test.fail(true, 'Known defect: BFF converts claims-service 404/403 into 500');
+    await page.goto('/claims');
+    const status = await page.evaluate(
+      async () => (await fetch('/api/claims/00000000-0000-0000-0000-000000000001')).status
+    );
+    expect(status).toBe(404);
   });
 });
