@@ -239,6 +239,7 @@ docker compose -f docker-compose.apps.yml up --build --pull never ui
 
 | File | Purpose |
 |------|---------|
+| [RUN_GUIDE.md](RUN_GUIDE.md) | **New machine? Start here:** step-by-step from installing tools and starting Docker to running every suite |
 | [TESTING.md](TESTING.md) | **Start here to run the tests:** what each suite covers, how to run it, the expected results |
 | [run-tests.sh](run-tests.sh) | One command per suite: `./run-tests.sh unit \| defects \| integration \| e2e \| load` |
 | [docs/QA_Findings_Report.pdf](docs/QA_Findings_Report.pdf) | Walkthrough report: 18 findings with live evidence and fixes |
