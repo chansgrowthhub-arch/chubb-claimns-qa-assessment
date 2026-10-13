@@ -38,3 +38,6 @@ venv/
 **/node_modules/
 **/.next/
 .DS_Store
+
+# Local editor settings
+.vscode/
