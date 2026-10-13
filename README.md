@@ -239,6 +239,8 @@ docker compose -f docker-compose.apps.yml up --build --pull never ui
 
 | File | Purpose |
 |------|---------|
+| [TESTING.md](TESTING.md) | **Start here to run the tests:** what each suite covers, how to run it, the expected results |
+| [run-tests.sh](run-tests.sh) | One command per suite: `./run-tests.sh unit \| defects \| integration \| e2e \| load` |
 | [docs/QA_Findings_Report.pdf](docs/QA_Findings_Report.pdf) | Walkthrough report: 18 findings with live evidence and fixes |
 | [TEST_STRATEGY.md](TEST_STRATEGY.md) | Risk assessment, test choices, findings, next steps |
 | [AI_JOURNAL.md](AI_JOURNAL.md) | What I accepted, challenged and overrode from the AI |
@@ -261,6 +263,8 @@ cd code/demo-app-ui && npm ci && npm run generate:api && cd -
 The E2E suite runs against the stack exactly as shipped. It does not need these workarounds, apart from the generated client.
 
 ### Running the tests
+
+The quickest way is the runner. Run `./run-tests.sh <suite>`, and see [TESTING.md](TESTING.md) for the full guide. The raw commands it wraps are below.
 
 ```bash
 # Unit and component suites (no Docker needed)
