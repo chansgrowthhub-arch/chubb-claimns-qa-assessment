@@ -6,7 +6,14 @@ This repository ships a layered automated test suite for the Claims Management a
 ./run-tests.sh <suite>      # unit | unit-claims | unit-bff | unit-ui | defects | integration | e2e | load
 ```
 
-Run `./run-tests.sh` with no argument to print this list. On Windows, use Git Bash.
+Run `./run-tests.sh` with no argument to print this list.
+
+**On Windows**, the script runs in Git Bash, which comes with Git for Windows. From PowerShell, call Git Bash explicitly. A plain `bash` in PowerShell is WSL's bash and will not work:
+
+```powershell
+cd "C:\path\to\demo-app-qa-main"
+& "C:\Program Files\Git\bin\bash.exe" ./run-tests.sh integration
+```
 
 ---
 
@@ -64,11 +71,13 @@ We read every layer of the code before writing a test. Then we put effort where 
 
 | Tool | Version | Check | Needed for |
 |------|---------|-------|------------|
-| JDK | 21 | `java -version` | Java unit, defect and integration suites |
-| Maven | 3.9+ | `mvn -version` | Same as above |
+| JDK | **exactly 21** | `java -version` | Java unit, defect and integration suites. Newer JDKs (for example 25 or 27) fail to compile the project because Lombok breaks. If several JDKs are installed, set `JAVA_HOME` to the JDK 21 folder. The runner checks this and stops with a clear message |
+| Maven | optional | `mvn -version` | If Maven is not installed, the runner uses each service's Maven Wrapper (`./mvnw`), which downloads Maven 3.9.9 on first use |
 | Node.js | 20+ | `node --version` | UI unit and E2E suites |
 | Docker Desktop | 24+, running | `docker info` | Integration, E2E (stack) and load suites |
 | Git Bash | any | Windows only | Running `run-tests.sh` |
+
+Installing JDK 21 on Windows: run `winget install EclipseAdoptium.Temurin.21.JDK`. Then point `JAVA_HOME` at it. In PowerShell use `$env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-21.<version>-hotspot"`. In Git Bash use `export JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-21.<version>-hotspot"`.
 
 On the first UI run, the script installs npm packages and generates the UI's API client. That client is gitignored and must be generated on every fresh clone. The first E2E run also downloads Chromium.
 
@@ -143,7 +152,10 @@ The full bug list with evidence is in `TEST_STRATEGY.md` and `docs/QA_Findings_R
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | UI tests or pages fail with `Can't resolve './generated'` | The UI API client is gitignored and was never generated | `cd code/demo-app-ui && npm run generate:api` (the runner does this for you) |
-| `docker: command not found` on Windows right after installing | Docker Desktop's per-user install is not on PATH in an already-open terminal | Open a new terminal, or add `%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin` to PATH |
+| `docker: command not found` on Windows right after installing | Docker Desktop's per-user install is not on PATH in an already-open terminal | The runner now finds it automatically. For your own shell, open a new terminal or add `%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin` to PATH |
+| `'/run-tests.sh' is not recognized` in PowerShell | PowerShell cannot run bash scripts, and the command was missing the leading dot | `& "C:\Program Files\Git\bin\bash.exe" ./run-tests.sh <suite>` (see the top of this guide) |
+| `Java 27 found, but this project needs JDK 21` | A newer JDK is first on PATH | Install JDK 21 and set `JAVA_HOME` to it (section 3) |
+| `Docker Desktop is unable to start`, or the runner says the engine is not running | Docker's engine stopped. On Windows this often follows a WSL update error (`Wsl/CallMsi/Install/ERROR_NOT_FOUND` in Docker's log) | Check that `wsl --version` works, then restart Docker Desktop from its tray menu or with `docker desktop restart` |
 | `./run-tests.sh: bad interpreter` or `$'\r'` errors | The script was saved with Windows line endings | `git config core.autocrlf input` and check out again (the repo's `.gitattributes` keeps `.sh` files on LF) |
 | Integration tests fail with `invalid value for parameter "TimeZone"` | An unpinned `postgres:latest` image (fixed in this repo) | Keep test images pinned to the versions in `docker-compose.infra.yml` |
 | Load test: some or all logins return 401 | Keycloak brute-force protection: parallel logins to one account are rejected, and two failures within 1 s lock it for 60 s | The runner seeds dedicated accounts, `loaduser1..N+1` plus `loadadmin`, so no account is shared. k6 numbers virtual users across both scenarios, so it needs one more account than `K6_VUS`. Keycloak runs in memory, so accounts vanish when the stack restarts; the runner re-seeds every time |

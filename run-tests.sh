@@ -37,12 +37,35 @@ need() {
   command -v "$1" >/dev/null 2>&1 || { fail "'$1' is not on PATH. $2"; exit 2; }
 }
 
+REQUIRED_JAVA=21
+
+# Maven: use an installed `mvn` if there is one, otherwise each service's Maven Wrapper
+# (./mvnw downloads Maven 3.9.9 on first use), so only a JDK has to be installed.
+MVN_CMD=""
+
 check_java() {
-  need java "Install JDK 21 (https://adoptium.net)."
-  need mvn "Install Maven 3.9+."
+  local java_bin="java"
+  [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ] && java_bin="$JAVA_HOME/bin/java"
+  command -v "$java_bin" >/dev/null 2>&1 || { fail "No Java found. Install JDK $REQUIRED_JAVA (https://adoptium.net) and set JAVA_HOME to it."; exit 2; }
+  local version major
+  version=$("$java_bin" -version 2>&1 | head -1 | sed -E 's/.*version "([^"]+)".*/\1/')
+  major="${version%%.*}"
+  if [ "$major" != "$REQUIRED_JAVA" ]; then
+    fail "Java $version found, but this project needs JDK $REQUIRED_JAVA (newer JDKs fail to compile it: Lombok breaks)."
+    echo "     Install JDK $REQUIRED_JAVA and point JAVA_HOME at it, for example:"
+    echo "       export JAVA_HOME=\"/c/Program Files/Eclipse Adoptium/jdk-21...\"   (Git Bash)"
+    exit 2
+  fi
+  if command -v mvn >/dev/null 2>&1; then MVN_CMD="mvn"; else MVN_CMD="./mvnw"; fi
 }
 
 check_docker() {
+  if ! command -v docker >/dev/null 2>&1; then
+    # Docker Desktop's per-user install is not on PATH in terminals opened before installing it.
+    local per_user="${LOCALAPPDATA:-}/Programs/DockerDesktop/resources/bin"
+    command -v cygpath >/dev/null 2>&1 && [ -n "${LOCALAPPDATA:-}" ] && per_user="$(cygpath -u "$LOCALAPPDATA")/Programs/DockerDesktop/resources/bin"
+    if [ -x "$per_user/docker.exe" ] || [ -x "$per_user/docker" ]; then export PATH="$per_user:$PATH"; fi
+  fi
   need docker "Install and start Docker Desktop."
   docker info >/dev/null 2>&1 || { fail "Docker is installed but the engine is not running. Start Docker Desktop."; exit 2; }
 }
@@ -71,7 +94,7 @@ ensure_ui_ready() {
 run_maven() { # <dir> <label> [extra args...]
   local dir="$1" label="$2"; shift 2
   say "$label"
-  if (cd "$dir" && mvn -B test ${MAVEN_ARGS:-} "$@"); then pass "$label"; return 0; fi
+  if (cd "$dir" && $MVN_CMD -B test ${MAVEN_ARGS:-} "$@"); then pass "$label"; return 0; fi
   fail "$label"; return 1
 }
 
@@ -89,7 +112,7 @@ defects() {
   check_java
   say "Known-defect tests (expected to FAIL until findings 5 and 6 are fixed)"
   local log; log="$(mktemp)"
-  (cd "$BFF" && mvn -B test ${MAVEN_ARGS:-} -Dgroups=defect -Dsurefire.excludedGroups=integration) 2>&1 | tee "$log"
+  (cd "$BFF" && $MVN_CMD -B test ${MAVEN_ARGS:-} -Dgroups=defect -Dsurefire.excludedGroups=integration) 2>&1 | tee "$log"
   if grep -q "BUILD SUCCESS" "$log"; then
     fail "The defect tests now PASS: the bugs look fixed. Remove @Tag(\"defect\") from those tests so they join the normal suite."
     rm -f "$log"; return 1
