@@ -6,7 +6,7 @@ This repository ships a layered automated test suite for the Claims Management a
 ./run-tests.sh <suite>      # unit | unit-claims | unit-bff | unit-ui | defects | integration | e2e | load
 ```
 
-Run `./run-tests.sh` with no argument to print this list. Setting up on a new machine? Follow [RUN_GUIDE.md](RUN_GUIDE.md) step by step first.
+Run `./run-tests.sh` with no argument to print this list.
 
 **On Windows**, the script runs in Git Bash, which comes with Git for Windows. From PowerShell, call Git Bash explicitly. A plain `bash` in PowerShell is WSL's bash and will not work:
 
