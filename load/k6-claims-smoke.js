@@ -14,11 +14,14 @@ import http from 'k6/http';
 import { check, group, sleep } from 'k6';
 
 const BFF_URL = __ENV.BFF_URL || 'http://localhost:8090';
-// One account per VU: loaduser<VU>@demo.com, created by seed-load-users.sh.
+// One account per VU: loaduser<VU>@demo.com, created by seed-load-users.sh. __VU is numbered across
+// both scenarios (1..VUS+1), so seed at least VUS+1 users (run-tests.sh load does this).
 const claimantForThisVu = () => ({ email: `loaduser${__VU}@demo.com`, password: 'LoadUser123!' });
+// A dedicated admin created by seed-load-users.sh. Sharing admin@demo.com with E2E runs or
+// people trips Keycloak's quick-login check (two failures within 1 s lock the account for 60 s).
 const ADMIN = {
-  email: __ENV.ADMIN_EMAIL || 'admin@demo.com',
-  password: __ENV.ADMIN_PASSWORD || 'Admin123!',
+  email: __ENV.ADMIN_EMAIL || 'loadadmin@demo.com',
+  password: __ENV.ADMIN_PASSWORD || 'LoadUser123!',
 };
 const JSON_HEADERS = { headers: { 'Content-Type': 'application/json' } };
 const THINK_TIME_SECONDS = 1;

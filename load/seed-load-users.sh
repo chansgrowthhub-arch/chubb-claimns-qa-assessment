@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# Creates loaduser1..N@demo.com (password LoadUser123!, role claimant) in the demo-app realm.
+# Creates the Keycloak accounts the k6 load test logs in with (password LoadUser123!):
+#   loaduser1..N@demo.com   role claimant, one per claimant virtual user
+#   loadadmin@demo.com      role admin, used by the admin virtual user
 #
-# Why: Keycloak brute-force protection is enabled in the realm, and concurrent password grants
-# for the SAME account are rejected (about half return 401 with correct credentials). A load
-# test that shares one account therefore measures Keycloak contention, not the app. Each k6
-# VU logs in as its own user instead. Safe to re-run: existing users return 409 and are skipped.
+# Why dedicated accounts: Keycloak brute-force protection is on in the realm. Concurrent logins
+# to the SAME account are rejected (about half return 401 with correct credentials), and two
+# failures within 1 s lock that account for 60 s. A load test that shares accounts with each
+# other, with E2E runs or with people therefore measures Keycloak lockouts, not the app.
 #
 # Usage: ./load/seed-load-users.sh [count]      (default 20; needs the stack running)
-# Keycloak runs with KC_DB=dev-mem, so seeded users are lost whenever the infra stack restarts:
-# re-run this script after every ./start-infra.sh.
+# Safe to re-run: existing users return 409 and are skipped. Keycloak runs with KC_DB=dev-mem,
+# so seeded users are lost whenever the infra stack restarts: run this after every ./start-infra.sh
+# (./run-tests.sh load does it for you).
 set -euo pipefail
 COUNT="${1:-20}"
 KC="${KEYCLOAK_URL:-http://localhost:8180}"
@@ -18,18 +21,25 @@ PASSWORD="LoadUser123!"
 TOKEN=$(curl -sf -X POST "$KC/realms/master/protocol/openid-connect/token" \
   -d grant_type=password -d client_id=admin-cli -d username=admin --data-urlencode "password=$ADMIN_PASSWORD" \
   | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
-ROLE=$(curl -sf -H "Authorization: Bearer $TOKEN" "$KC/admin/realms/demo-app/roles/claimant")
+role_json() { curl -sf -H "Authorization: Bearer $TOKEN" "$KC/admin/realms/demo-app/roles/$1"; }
+CLAIMANT_ROLE=$(role_json claimant)
+ADMIN_ROLE=$(role_json admin)
 
-for i in $(seq 1 "$COUNT"); do
-  USER="loaduser$i@demo.com"
-  STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $TOKEN" \
+create_user() { # <email> <last name> <role json>
+  local user="$1" last="$2" role="$3" status id
+  status=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" "$KC/admin/realms/demo-app/users" \
-    -d "{\"username\":\"$USER\",\"email\":\"$USER\",\"firstName\":\"Load\",\"lastName\":\"User$i\",\"enabled\":true,\"emailVerified\":true,\"credentials\":[{\"type\":\"password\",\"value\":\"$PASSWORD\",\"temporary\":false}]}")
-  if [ "$STATUS" = "201" ]; then
-    ID=$(curl -sf -H "Authorization: Bearer $TOKEN" "$KC/admin/realms/demo-app/users?username=$USER&exact=true" \
+    -d "{\"username\":\"$user\",\"email\":\"$user\",\"firstName\":\"Load\",\"lastName\":\"$last\",\"enabled\":true,\"emailVerified\":true,\"credentials\":[{\"type\":\"password\",\"value\":\"$PASSWORD\",\"temporary\":false}]}")
+  if [ "$status" = "201" ]; then
+    id=$(curl -sf -H "Authorization: Bearer $TOKEN" "$KC/admin/realms/demo-app/users?username=$user&exact=true" \
       | python3 -c "import sys, json; print(json.load(sys.stdin)[0]['id'])")
     curl -sf -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-      "$KC/admin/realms/demo-app/users/$ID/role-mappings/realm" -d "[$ROLE]"
+      "$KC/admin/realms/demo-app/users/$id/role-mappings/realm" -d "[$role]"
   fi
-  echo "$USER: $STATUS"
+  echo "$user: $status"
+}
+
+for i in $(seq 1 "$COUNT"); do
+  create_user "loaduser$i@demo.com" "User$i" "$CLAIMANT_ROLE"
 done
+create_user "loadadmin@demo.com" "Admin" "$ADMIN_ROLE"
