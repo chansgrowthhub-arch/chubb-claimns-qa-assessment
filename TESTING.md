@@ -99,7 +99,7 @@ On the first UI run, the script installs npm packages and generates the UI's API
 ### Full stack running
 ```bash
 ./start-infra.sh               # Postgres, Kafka, Redis, Keycloak
-./start-app.sh                 # claims service, BFF, UI on http://localhost:3001
+./start-app.sh -d              # claims service, BFF, UI on http://localhost:3001 (-d = background)
 ./run-tests.sh e2e             # about 30 s once the stack is up
 ./run-tests.sh load            # about 1.5 min; K6_VUS=20 K6_DURATION=2m ./run-tests.sh load to change it
 ```
